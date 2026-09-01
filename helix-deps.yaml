@@ -1,0 +1,23 @@
+# helix-deps.yaml — passage Submodule-Dependency Manifest
+# Per HelixConstitution §11.4.31 (Submodule-Dependency-Manifest Mandate).
+#
+# Schema reference: <constitution-submodule>/Constitution.md §11.4.31.
+
+schema_version: 1
+# passage consumes exactly one own-org module. Per §11.4.28(C) it is NOT
+# nested here: the consuming project mounts it at its own root
+# (<root>/submodules/verdict) and passage reaches it from there.
+deps:
+  - name: verdict
+    ssh_url: git@github.com:vasic-digital/verdict.git
+    ref: main
+    why: >-
+      The three-valued outcome type returned by registry resolution, so
+      "could not determine" is never reported as a hit or a miss.
+    layout: grouped
+
+transitive_handling:
+  recursive: true
+  conflict_resolution: operator-required
+
+language_specific_subtree: false

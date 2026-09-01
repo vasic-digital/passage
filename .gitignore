@@ -1,0 +1,16 @@
+# Build artefacts
+/bin/
+/build/
+/dist/
+*.exe
+*.so
+*.test
+# Coverage / profiling
+coverage.out
+*.prof
+# Temp / OS / editor
+*.tmp
+*.swp
+*~
+.DS_Store
+.idea/
