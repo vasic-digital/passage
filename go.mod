@@ -35,7 +35,7 @@ go 1.26.2
 // `replace` here would be ignored by the Go tool in that consumer anyway.
 
 require (
-	github.com/vasic-digital/verdict v0.1.0
+	github.com/vasic-digital/verdict v0.1.1
 	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.56.0
 )
