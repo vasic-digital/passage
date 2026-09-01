@@ -6,11 +6,15 @@ go 1.26.2
 //
 // Passage identity is the contract every citation, cross-reference and
 // redaction resolves through. It is also completely generic: it is about
-// stable identifiers for spans of text in files, and it knows nothing about
-// chapters, transcripts, recordings or curricula. Those are CONSUMER concepts,
-// and the module boundary is what keeps them out — this module does not
-// require any consumer, so no consumer-shaped symbol can appear here
-// even by accident. `TestNoConsumerShapedDependencies` asserts it.
+// stable identifiers for spans of text in files, and it names no consuming
+// application's subject matter.
+//
+// The module boundary keeps a consumer's CODE out and nothing more. It does
+// NOT keep a consumer's VOCABULARY out: vocabulary arrives by hand, in a field
+// name or a column name, with no import to stop it — and it did, which is why
+// this comment no longer claims otherwise. The instruments are
+// `TestNoConsumerShapedDependencies` for this file and the guard family in
+// `pkg/passage/decoupling_test.go` for the API, the struct tags and the schema.
 //
 // `internal/` was rejected outright: Go makes an `internal/` package
 // importable only from within its own module, by language rule, so it would

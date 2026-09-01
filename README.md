@@ -60,15 +60,43 @@ change when the text changes. Change detection is its one job; identity is not.
 
 ## This module is project-not-aware
 
-It is about identity for spans of text in files. It knows nothing about
-chapters, courses, recordings, transcripts or any other application concept —
-those belong to consumers, which map their own content onto `Observation` and
-read `Record` back.
+It is about identity for spans of text in files. It names no consuming
+application's content types, no unit of its subject matter and no role of the
+people in it. Those belong to consumers, which map their own material onto
+`Observation` and read `Record` back.
 
-It is a separate Go module precisely so that boundary is enforced by the
-compiler rather than by review: it does not require any consumer, so no
-consumer-shaped symbol can appear here even by accident.
-`TestNoConsumerShapedDependencies` asserts it.
+Three fields exist so a consumer can carry its own vocabulary through without
+this module learning any of it:
+
+| field | what this module does with it |
+|---|---|
+| `Kind` | stores it. A consumer-defined token; **no members are declared here** and no `CHECK` constraint enumerates any. The only rule is that it must be a storable token. |
+| `Scope` / `ScopeOrder` | stores and **indexes** them, as the two columns of `passages_by_scope`. Grouping and ordering are real storage needs; what the group *is* is not this module's business. |
+| `Attrs` | stores it and hands it back. A `map[string]string` this module never reads a key of. |
+
+`Record.Metadata()` renders those plus the library-owned facts as one
+`map[string]any`, which is the seam onto a retrieval document of the common
+`{ID, Content, Metadata, Score, Source}` shape — met, never imported and never
+reimplemented:
+
+```go
+doc.ID       = string(rec.PID)   // the minted pid IS the citable id
+doc.Content  = rec.Public().Text // Public() so a redacted row carries none
+doc.Metadata = rec.Metadata()
+doc.Source   = rec.SourceRef.Path
+```
+
+**The module boundary is not what enforces this, and saying otherwise was the
+bug.** Being a separate Go module keeps a consumer's *code* out; it is no
+barrier at all to a consumer's *vocabulary*, which arrives with no import and
+no require line, typed in by hand — and for two releases it had. The
+instruments that actually hold the line are in
+[`pkg/passage/decoupling_test.go`](pkg/passage/decoupling_test.go): a
+dictionary scan over every source file, comments included, plus go.mod and this
+README; a reflection pass over the exported types' fields and struct tags; an
+AST check that no `Kind` constant is declared; and a behavioural check that
+reads the built database back. Each ships with a paired mutation that has been
+observed to fail.
 
 All test fixtures are synthetic.
 
@@ -77,6 +105,11 @@ All test fixtures are synthetic.
 ```bash
 go get github.com/vasic-digital/passage
 ```
+
+**`v0.2.0` is a breaking release.** Nothing in it is source-compatible with
+`v0.1.x`, and a derived database written by `v0.1.x` is refused rather than
+migrated in place. [`CHANGELOG.md`](CHANGELOG.md) carries the complete
+field-by-field and column-by-column mapping and the upgrade procedure.
 
 As a submodule, mounted at the consuming project's **root** — nested
 submodules are forbidden (HelixConstitution §11.4.28), so `verdict` is mounted
@@ -106,10 +139,14 @@ declares one. That is a language rule, not a duplication mistake.
 
 ```go
 m := passage.NewMinter()
-reg := passage.NewRegistry()
 
-// Ingest a markdown file: scan its anchors, mint pids for new blocks.
-res, err := reg.SyncFile("corpus/notes.md", m)
+// Optional: your own domain invariants, run on every write this registry
+// takes. They are yours, so a different consumer is not bound by them.
+reg := passage.NewRegistry(passage.WithRecordValidator(myRules))
+
+// Ingest a markdown file: scan its anchors, mint pids for new blocks. The
+// kind is YOUR token — this package declares none and infers none.
+res, err := reg.SyncFile("corpus/notes.md", passage.Kind("my_section"), m)
 
 // Resolve a citation.
 switch r := reg.Resolve(pid); r.Outcome {

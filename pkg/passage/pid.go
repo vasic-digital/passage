@@ -28,11 +28,17 @@
 //
 // # Scope
 //
-// This package is about identity for spans of text in files. It knows nothing
-// about chapters, transcripts, recordings, curricula or any other application
-// concept — those belong to consumers, which map their own content onto
-// Observation and read Record back. It is a separate Go module precisely so
-// that boundary is enforced by the compiler rather than by review.
+// This package is about identity for spans of text in files, and about
+// nothing else. It names no consuming application's content types, no unit of
+// its subject matter, and no role of the people in it. Those belong to
+// consumers, which map their own material onto Observation, carry their own
+// vocabulary in Kind, Scope and Attrs, and read Record back.
+//
+// This paragraph is not a promise. Being a separate Go module keeps the
+// consumer's CODE out; it does nothing to keep the consumer's VOCABULARY out,
+// which has to be copied in by hand and once was. The instrument that actually
+// holds the line is the guard family in decoupling_test.go, which reads this
+// package's own source, struct tags and schema — including this comment.
 package passage
 
 import (
@@ -51,7 +57,7 @@ import (
 //
 // Deliberately absent: any accessor for the embedded timestamp. The ULID
 // timestamp component is the ingest wall clock and carries NO semantic
-// meaning; sorting passages by pid, inferring recording order from a pid, or
+// meaning; sorting passages by pid, inferring any order from a pid, or
 // reading a date out of one is a defect. Offering a Time() method would invite
 // exactly that, so none exists.
 type PID string

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,7 @@ import (
 func minimalRecord(pid PID, text string) Record {
 	return Record{
 		PID:  pid,
-		Kind: KindDocSection,
+		Kind: fixtureKind,
 		SourceRef: SourceRef{
 			Path: "corpus/x.md", LineStart: 2, LineEnd: 2, Anchor: AnchorInline,
 		},
@@ -125,9 +126,9 @@ func TestRecordKeyOrderIsFixed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"pid", "kind", "chapter_slug", "source_ref", "text", "machine_text",
-		"provenance", "confidence", "uncertain", "uncertain_reason", "t_start_s", "t_end_s",
-		"speaker", "speaker_source", "redacted", "content_hash", "minted_at", "ingest_run"}
+	want := []string{"pid", "kind", "scope", "scope_order", "source_ref", "text", "machine_text",
+		"provenance", "confidence", "uncertain", "uncertain_reason", "attrs",
+		"redacted", "content_hash", "minted_at", "ingest_run"}
 	at := 0
 	for _, k := range want {
 		idx := strings.Index(string(b), `"`+k+`":`)
@@ -150,40 +151,248 @@ func TestRecordValidationEnforcesTheFieldInvariants(t *testing.T) {
 	if err := base.Validate(); err != nil {
 		t.Fatalf("a minimal valid record was rejected: %v", err)
 	}
-	f := 0.0
 	cases := []struct {
 		name  string
 		mutex func(*Record)
 	}{
 		{"F3 uncertain without a reason", func(r *Record) { r.Uncertain = true }},
-		{"F3 reason without uncertain", func(r *Record) { s := "inaudible"; r.UncertainReason = &s }},
-		{"F4 machine-attributed speaker", func(r *Record) {
-			s := "Speaker A"
-			r.Speaker = &s
-			src := SpeakerSource("machine")
-			r.SpeakerSource = &src
-		}},
-		{"F4 speaker with no source", func(r *Record) { s := "Speaker A"; r.Speaker = &s }},
-		{"F5 transcript without timestamps", func(r *Record) { r.Kind = KindTranscript }},
-		{"F5 t_end before t_start", func(r *Record) {
-			r.Kind = KindTranscript
-			hi, lo := 9.0, 1.0
-			r.TStartS, r.TEndS = &hi, &lo
-		}},
+		{"F3 reason without uncertain", func(r *Record) { s := "unresolved"; r.UncertainReason = &s }},
 		{"F2 human_corrected without machine_text", func(r *Record) {
 			r.Provenance = ProvenanceHumanCorrected
 			r.MachineText = ""
 		}},
 		{"F7 missing content_hash", func(r *Record) { r.ContentHash = "" }},
 		{"invalid pid", func(r *Record) { r.PID = "not-a-ulid" }},
-		{"unknown kind", func(r *Record) { r.Kind = "video" }},
-		{"non-transcript with a timestamp", func(r *Record) { r.TStartS = &f }},
+		{"empty kind", func(r *Record) { r.Kind = "" }},
+		{"malformed kind: uppercase", func(r *Record) { r.Kind = "ProseBlock" }},
+		{"malformed kind: leading digit", func(r *Record) { r.Kind = "1st_block" }},
+		{"malformed kind: punctuation", func(r *Record) { r.Kind = "prose-block" }},
+		{"attrs with an empty key", func(r *Record) { r.Attrs = map[string]string{"": "x"} }},
+		{"attrs colliding with a reserved key", func(r *Record) {
+			r.Attrs = map[string]string{"content_hash": "sha256:deadbeef"}
+		}},
 	}
 	for _, c := range cases {
 		rec := base
 		c.mutex(&rec)
 		if err := rec.Validate(); err == nil {
 			t.Errorf("%s: accepted", c.name)
+		}
+	}
+	// The counterpart: a kind this package has never heard of is ACCEPTED,
+	// because the vocabulary belongs to the consumer.
+	for _, k := range []Kind{"prose_block", "clause", "utterance", "commit_message", "q7"} {
+		rec := base
+		rec.Kind = k
+		if err := rec.Validate(); err != nil {
+			t.Errorf("a consumer-defined kind %q was rejected: %v", k, err)
+		}
+	}
+}
+
+// The seam that replaces the domain rules this package used to hardcode. A
+// consumer installs its own invariants at the same choke point; they run on
+// every write, and they are the CONSUMER's, so a different consumer is not
+// bound by them.
+func TestAConsumerRecordValidatorRunsOnEveryWritePath(t *testing.T) {
+	// A rule that could not live in this package: it is true of one consumer's
+	// domain and meaningless in another's.
+	const myKind Kind = "timed_segment"
+	domain := func(r Record) error {
+		if r.Kind != myKind {
+			return nil
+		}
+		if r.Attrs["t_start_s"] == "" || r.Attrs["t_end_s"] == "" {
+			return fmt.Errorf("kind %q requires t_start_s and t_end_s in attrs", myKind)
+		}
+		return nil
+	}
+	reg := NewRegistry(WithRecordValidator(domain))
+
+	bad := minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", "x")
+	bad.Kind = myKind
+	if err := reg.Put(bad); err == nil {
+		t.Fatal("the consumer's record validator did not run on Put")
+	}
+	bad.Attrs = map[string]string{"t_start_s": "1", "t_end_s": "2"}
+	if err := reg.Put(bad); err != nil {
+		t.Fatalf("a record satisfying the consumer's rule was rejected: %v", err)
+	}
+	// It also runs on the Sync path, which reaches putForce rather than Put.
+	obs := []Observation{{
+		Kind: myKind,
+		Text: "a segment with no offsets",
+		Ref:  SourceRef{Path: "corpus/x.md", LineStart: 9, LineEnd: 9, Anchor: AnchorInline},
+	}}
+	if _, err := reg.Sync(obs, newTestMinter()); err == nil {
+		t.Fatal("the consumer's record validator did not run on Sync")
+	}
+	// And a registry WITHOUT the validator accepts the same record, proving
+	// the rule is the consumer's rather than this package's.
+	if err := NewRegistry().Put(func() Record {
+		r := minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", "x")
+		r.Kind = myKind
+		return r
+	}()); err != nil {
+		t.Fatalf("a registry with no consumer validator rejected the record: %v", err)
+	}
+}
+
+// Scope and ScopeOrder are stored, indexed and returned without this package
+// having any opinion about what they mean.
+func TestScopeAndAttrsRoundTripAsOpaqueConsumerData(t *testing.T) {
+	dir := t.TempDir()
+	reg := NewRegistry()
+	scope := "any-grouping-key-the-consumer-likes"
+	order := 512.4
+	rec := minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", "x")
+	rec.Scope = &scope
+	rec.ScopeOrder = &order
+	rec.Attrs = map[string]string{"zeta": "last", "alpha": "first"}
+	if err := reg.Put(rec); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "passages.jsonl")
+	if err := reg.WriteJSONL(path); err != nil {
+		t.Fatal(err)
+	}
+	back, err := LoadJSONL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := back.Lookup(rec.PID)
+	if !ok {
+		t.Fatal("the record did not survive a round trip")
+	}
+	if got.Scope == nil || *got.Scope != scope {
+		t.Errorf("scope = %v, want %q", got.Scope, scope)
+	}
+	if got.ScopeOrder == nil || *got.ScopeOrder != order {
+		t.Errorf("scope_order = %v, want %v", got.ScopeOrder, order)
+	}
+	if got.Attrs["alpha"] != "first" || got.Attrs["zeta"] != "last" {
+		t.Errorf("attrs = %v", got.Attrs)
+	}
+	// Byte-identical re-write, which is why Attrs is map[string]string and not
+	// map[string]any: a JSON number would round-trip through float64 and could
+	// come back formatted differently.
+	again := filepath.Join(dir, "again.jsonl")
+	if err := back.WriteJSONL(again); err != nil {
+		t.Fatal(err)
+	}
+	a, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Errorf("a registry carrying attrs did not re-write byte-identically:\n%s\n---\n%s", a, b)
+	}
+}
+
+// Composition with a retrieval document of the shape
+// {ID, Content, Metadata, Score, Source} — met, not imported, not duplicated.
+func TestMetadataComposesWithARetrievalDocument(t *testing.T) {
+	scope := "group-7"
+	order := 512.4
+	rec := minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", "the passage body")
+	rec.Scope = &scope
+	rec.ScopeOrder = &order
+	// A consumer's own attribute, under a name only the consumer knows. The
+	// name is DERIVED from the decoupling gate's dictionary rather than
+	// written out, so this test can demonstrate that a consumer-shaped key
+	// travels as data without this module's source speaking the word. The
+	// real thing is demonstrated in the consumer, where the word belongs.
+	consumerKey := consumerVocabulary[0] + "_slug"
+	rec.Attrs = map[string]string{consumerKey: "01-first"}
+
+	// The four-line mapping a consumer writes. The field NAMES here are the
+	// retrieval document's; the values are all this package supplies.
+	id := string(rec.PID)
+	content := rec.Public().Text
+	metadata := rec.Metadata()
+	source := rec.SourceRef.Path
+
+	if !ValidPID(id) {
+		t.Errorf("the document id %q is not a pid", id)
+	}
+	if content != "the passage body" {
+		t.Errorf("content = %q", content)
+	}
+	if source != "corpus/x.md" {
+		t.Errorf("source = %q", source)
+	}
+	if metadata[consumerKey] != "01-first" {
+		t.Errorf("the consumer's own attribute did not survive: %v", metadata)
+	}
+	if metadata["scope"] != scope || metadata["scope_order"] != order {
+		t.Errorf("metadata lost scope/scope_order: %v", metadata)
+	}
+	if metadata["kind"] != string(fixtureKind) || metadata["content_hash"] != rec.ContentHash {
+		t.Errorf("metadata lost a library-owned key: %v", metadata)
+	}
+	// A redacted passage contributes no text to the document (F6).
+	rec.Redacted = true
+	if rec.Public().Text != "" {
+		t.Error("F6 VIOLATED: a redacted record would hand text to a retrieval document")
+	}
+}
+
+// A line carrying a key this package does not define must FAIL LOUDLY rather
+// than load with that key silently dropped by encoding/json.
+//
+// This is what makes the v0.1 -> v0.2 break safe. Every field this package
+// retired when the consumer-shaped vocabulary left is, by construction, a key
+// it no longer defines, so a pre-v0.2 row stops the load instead of loading
+// successfully minus its contents. The seeds below are DERIVED from the
+// decoupling gate's dictionary rather than written out, so proving the rule
+// does not require this module's source to speak the words it is refusing.
+func TestLoadJSONLRefusesAKeyItDoesNotDefine(t *testing.T) {
+	dir := t.TempDir()
+	base, err := json.Marshal(minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", "x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// CONTROL: the same line with nothing extra loads.
+	ok := filepath.Join(dir, "ok.jsonl")
+	if err := os.WriteFile(ok, append(base, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadJSONL(ok); err != nil {
+		t.Fatalf("CONTROL FAILED: a current line did not load: %v", err)
+	}
+
+	seeds := []string{"a_key_this_package_does_not_define"}
+	for _, tok := range consumerVocabulary {
+		// For the first entry this composes the exact field this module used
+		// to ship, without the literal appearing anywhere in its source.
+		seeds = append(seeds, tok+"_slug")
+	}
+	for i, k := range seeds {
+		var m map[string]any
+		if err := json.Unmarshal(base, &m); err != nil {
+			t.Fatal(err)
+		}
+		m[k] = "a value somebody meant to keep"
+		line, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, fmt.Sprintf("seed%02d.jsonl", i))
+		if err := os.WriteFile(p, append(line, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err = LoadJSONL(p)
+		if err == nil {
+			t.Errorf("a line carrying the undefined key %q loaded silently; its value would "+
+				"have been dropped with no error and no symptom", k)
+			continue
+		}
+		if !strings.Contains(err.Error(), k) {
+			t.Errorf("the refusal for %q does not name the key: %v", k, err)
 		}
 	}
 }
@@ -352,7 +561,7 @@ func TestBuildDBMaterialisesAndFTSWorks(t *testing.T) {
 func TestS2_ContentHashCarriesNoUniquenessConstraint(t *testing.T) {
 	dir := t.TempDir()
 	reg := NewRegistry()
-	same := "verbatim repetition happens in a spoken transcript"
+	same := "verbatim repetition happens in real material"
 	a := minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", same)
 	b := minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPB", same)
 	b.SourceRef.LineStart, b.SourceRef.LineEnd = 40, 40

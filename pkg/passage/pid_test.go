@@ -81,8 +81,8 @@ func TestPIDExposesNoTimeAccessor(t *testing.T) {
 }
 
 func TestMinterIsMonotonicWithinAProcessEvenWhenTheClockStalls(t *testing.T) {
-	// A stalled clock is the realistic case: minting 1,400 transcript
-	// passages takes far less than a millisecond per passage.
+	// A stalled clock is the realistic case: minting 1,400 passages in one
+	// ingest takes far less than a millisecond per passage.
 	m := NewMinter(WithClock(func() time.Time { return time.Unix(1756000000, 0).UTC() }),
 		WithEntropy(newDeterministicEntropy(7)))
 	var prev PID
@@ -144,6 +144,11 @@ const (
 	// measured Lumen experiment: text changes, line numbers do not.
 	typoText      = "[00:08:39] the reciever must verify the hash before it trusts the part"
 	correctedText = "[00:08:39] the receiver must verify the hash before it trusts the part"
+
+	// fixtureKind is the kind these fixtures pass to SyncFile. It is a token
+	// invented for the tests, which is the whole point: this package declares
+	// no kinds, so a caller — including a test — has to supply its own.
+	fixtureKind Kind = "prose_block"
 )
 
 func fixtureDoc() string {
@@ -160,14 +165,14 @@ func fixtureDoc() string {
 // checkG1 proves: correcting a passage's text does not change its pid, and the
 // citation to it keeps resolving to THAT passage — with its corrected text.
 func checkG1(dir string, strategy KeyStrategy) error {
-	path := filepath.Join(dir, "transcript.md")
+	path := filepath.Join(dir, "doc.md")
 	if err := os.WriteFile(path, []byte(fixtureDoc()), 0o644); err != nil {
 		return err
 	}
 	reg := NewRegistry()
 	m := newTestMinter()
 
-	first, err := reg.SyncFile(path, m, WithKeyStrategy(strategy))
+	first, err := reg.SyncFile(path, fixtureKind, m, WithKeyStrategy(strategy))
 	if err != nil {
 		return fmt.Errorf("first sync: %w", err)
 	}
@@ -191,7 +196,7 @@ func checkG1(dir string, strategy KeyStrategy) error {
 		return err
 	}
 
-	second, err := reg.SyncFile(path, m, WithKeyStrategy(strategy))
+	second, err := reg.SyncFile(path, fixtureKind, m, WithKeyStrategy(strategy))
 	if err != nil {
 		return fmt.Errorf("second sync: %w", err)
 	}
@@ -238,14 +243,14 @@ func checkG1(dir string, strategy KeyStrategy) error {
 // Reproduces the measured D-SEARCH-1 run 3 — prepend a section, everything
 // below it moves.
 func checkG2(dir string, strategy KeyStrategy) error {
-	path := filepath.Join(dir, "transcript.md")
+	path := filepath.Join(dir, "doc.md")
 	if err := os.WriteFile(path, []byte(fixtureDoc()), 0o644); err != nil {
 		return err
 	}
 	reg := NewRegistry()
 	m := newTestMinter()
 
-	if _, err := reg.SyncFile(path, m, WithKeyStrategy(strategy)); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m, WithKeyStrategy(strategy)); err != nil {
 		return fmt.Errorf("first sync: %w", err)
 	}
 
@@ -275,7 +280,7 @@ func checkG2(dir string, strategy KeyStrategy) error {
 		return err
 	}
 
-	second, err := reg.SyncFile(path, m, WithKeyStrategy(strategy))
+	second, err := reg.SyncFile(path, fixtureKind, m, WithKeyStrategy(strategy))
 	if err != nil {
 		return fmt.Errorf("second sync: %w", err)
 	}
@@ -462,13 +467,13 @@ func TestMeasuredAsymmetry_EachCandidateFailsExactlyOneGuarantee(t *testing.T) {
 
 func TestContentHashIsChangeDetectionNotIdentity(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "transcript.md")
+	path := filepath.Join(dir, "doc.md")
 	if err := os.WriteFile(path, []byte(fixtureDoc()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	reg := NewRegistry()
 	m := newTestMinter()
-	if _, err := reg.SyncFile(path, m); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m); err != nil {
 		t.Fatal(err)
 	}
 	cited, err := pidOfTextContaining(reg, "reciever")
@@ -481,7 +486,7 @@ func TestContentHashIsChangeDetectionNotIdentity(t *testing.T) {
 	if err := replaceInFile(path, typoText, correctedText); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.SyncFile(path, m); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m); err != nil {
 		t.Fatal(err)
 	}
 
@@ -503,13 +508,13 @@ func TestContentHashIsChangeDetectionNotIdentity(t *testing.T) {
 func TestPairedMutation_ContentHashAsCitationKeyIsCaught(t *testing.T) {
 	// CONTROL: the real citation key survives a correction.
 	dir := t.TempDir()
-	path := filepath.Join(dir, "transcript.md")
+	path := filepath.Join(dir, "doc.md")
 	if err := os.WriteFile(path, []byte(fixtureDoc()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	reg := NewRegistry()
 	m := newTestMinter()
-	if _, err := reg.SyncFile(path, m); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m); err != nil {
 		t.Fatal(err)
 	}
 	cited, err := pidOfTextContaining(reg, "reciever")
@@ -522,7 +527,7 @@ func TestPairedMutation_ContentHashAsCitationKeyIsCaught(t *testing.T) {
 	if err := replaceInFile(path, typoText, correctedText); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.SyncFile(path, m); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m); err != nil {
 		t.Fatal(err)
 	}
 
@@ -542,13 +547,13 @@ func TestPairedMutation_ContentHashAsCitationKeyIsCaught(t *testing.T) {
 
 func TestSecondSyncMintsNothingAndLeavesTheFileByteIdentical(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "transcript.md")
+	path := filepath.Join(dir, "doc.md")
 	if err := os.WriteFile(path, []byte(fixtureDoc()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	reg := NewRegistry()
 	m := newTestMinter()
-	if _, err := reg.SyncFile(path, m); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m); err != nil {
 		t.Fatal(err)
 	}
 	afterFirst, err := os.ReadFile(path)
@@ -564,7 +569,7 @@ func TestSecondSyncMintsNothingAndLeavesTheFileByteIdentical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := reg.SyncFile(path, m)
+	res, err := reg.SyncFile(path, fixtureKind, m)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,17 +604,17 @@ func TestPairedMutation_UnconditionalMintingBreaksIdempotency(t *testing.T) {
 	// The mutation named by the contract: make R5 unconditional — mint
 	// whenever no anchor was READ THIS RUN. mutantNeverMatch is exactly that.
 	dir := t.TempDir()
-	path := filepath.Join(dir, "transcript.md")
+	path := filepath.Join(dir, "doc.md")
 	if err := os.WriteFile(path, []byte(fixtureDoc()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	reg := NewRegistry()
 	m := newTestMinter()
-	if _, err := reg.SyncFile(path, m, WithKeyStrategy(mutantNeverMatch{})); err != nil {
+	if _, err := reg.SyncFile(path, fixtureKind, m, WithKeyStrategy(mutantNeverMatch{})); err != nil {
 		t.Fatal(err)
 	}
 	sizeAfterFirst := reg.Len()
-	res, err := reg.SyncFile(path, m, WithKeyStrategy(mutantNeverMatch{}))
+	res, err := reg.SyncFile(path, fixtureKind, m, WithKeyStrategy(mutantNeverMatch{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,7 +647,7 @@ func TestForeignAnchorIsAnErrorNotAMint(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := NewRegistry()
-	if _, err := reg.SyncFile(path, newTestMinter()); err == nil {
+	if _, err := reg.SyncFile(path, fixtureKind, newTestMinter()); err == nil {
 		t.Fatal("a foreign anchor was silently adopted or re-minted; a copy-pasted block " +
 			"must never hijack an identity (R1c)")
 	}
@@ -655,13 +660,35 @@ func TestForeignAnchorIsAnErrorNotAMint(t *testing.T) {
 // The reusability claim, asserted mechanically.
 // ===========================================================================
 
+// TestNoConsumerShapedDependencies checks the DEPENDENCY MANIFEST and the
+// package's PLACEMENT. Its name is exact and its corpus is narrow, and that
+// narrowness is worth writing down, because for the module's first two
+// releases this test WAS the whole of the reusability claim.
+//
+// What it reads is go.mod and the package's own directory. What it therefore
+// proves is "this module does not IMPORT a consumer" and "this package is not
+// walled inside internal/". Both were true and stayed true the entire time the
+// package's own API carried a consumer's vocabulary in a struct field, a JSON
+// tag, an enum and a SQL column.
+//
+// The dictionary was never the problem: the `forbidden` list below already
+// contained the exact tokens that were sitting in registry.go. The CORPUS was
+// the problem — the right words, applied to the wrong file. The reasoning in
+// the go.mod comment made the same mistake in prose: "this module does not
+// require any consumer, so no consumer-shaped symbol can appear here even by
+// accident" is a non-sequitur. An absent dependency stops a consumer's code
+// from arriving; nothing about it stops a consumer's NOUNS from being typed in
+// by hand.
+//
+// The API, the struct tags and the schema are covered by the guard family in
+// decoupling_test.go, which shares the dictionary below.
 func TestNoConsumerShapedDependencies(t *testing.T) {
 	root := moduleRootDir(t)
 	b, err := os.ReadFile(filepath.Join(root, "go.mod"))
 	if err != nil {
 		t.Fatalf("read go.mod: %v", err)
 	}
-	forbidden := []string{"workshop", "curriculum", "chapter", "transcript", "backend"}
+	forbidden := append([]string{"backend"}, consumerVocabulary...)
 	for i, line := range strings.Split(string(b), "\n") {
 		code, _, _ := strings.Cut(line, "//")
 		low := strings.ToLower(strings.TrimSpace(code))

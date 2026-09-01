@@ -24,8 +24,9 @@ const (
 // Syntax is one artifact family's anchor comment syntax.
 //
 // The set is deliberately small. "Write a comment" is not universally
-// possible, and pretending otherwise would be inventing capability: WebVTT,
-// SRT, source code, PDFs and media carry no inline anchor at all.
+// possible, and pretending otherwise would be inventing capability: many
+// formats — binary containers, PDFs, timed-text files, program sources whose
+// toolchain rewrites comments — carry no inline anchor at all.
 type Syntax struct {
 	// Name identifies the family in errors.
 	Name string
@@ -147,10 +148,9 @@ func ScanAnchors(src []byte, s Syntax) ([]Anchor, error) {
 // anchor that immediately precedes each one.
 //
 // The segmentation is deliberately simple and is NOT the last word: a producer
-// with real structure — a transcript pipeline that knows its segment
-// boundaries and timestamps — builds Observation values itself and calls
-// Registry.Sync directly. Blocks exists so plain prose artifacts work with no
-// producer at all.
+// that already knows its own segment boundaries builds Observation values
+// itself and calls Registry.Sync directly. Blocks exists so plain prose
+// artifacts work with no producer at all.
 func Blocks(src []byte, s Syntax, path string, kind Kind) ([]Observation, error) {
 	if _, err := ScanAnchors(src, s); err != nil {
 		return nil, err

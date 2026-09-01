@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -20,40 +21,43 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite with FTS5; no cgo
 )
 
-// Kind is what sort of content a passage is.
+// Kind is the CONSUMER's own classification of a passage.
+//
+// This package declares no members and never will. An enum whose members are
+// enumerated here would be this library naming its consumer's domain, and a
+// second consumer with a different vocabulary would have to either misuse a
+// member that does not fit or patch this file. Both are the coupling the
+// module boundary exists to prevent.
+//
+// What survives is the validation that genuinely belongs to identity and
+// storage rather than to any domain: a kind must be PRESENT and must be a
+// stable, storable, diff-friendly token. Nothing here has an opinion about
+// what the token means.
 type Kind string
 
-const (
-	KindTranscript Kind = "transcript"
-	KindDocSection Kind = "doc_section"
-	KindCode       Kind = "code"
-	KindDiagram    Kind = "diagram"
-)
+// kindPattern is the syntactic contract for a kind: lowercase ASCII, digits
+// and underscores, starting with a letter, at most 64 characters. It is a
+// storage constraint (indexable, case-stable, safe in a URL and in a column),
+// not a vocabulary.
+var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-func (k Kind) valid() bool {
-	switch k {
-	case KindTranscript, KindDocSection, KindCode, KindDiagram:
-		return true
-	}
-	return false
-}
+// Valid reports whether k is a well-formed kind token. It says nothing about
+// whether the kind means anything to any particular consumer — that judgement
+// belongs to the consumer, and Registry.WithRecordValidator is the seam for it.
+func (k Kind) Valid() bool { return kindPattern.MatchString(string(k)) }
 
 // Provenance records whether the current text is the machine's or a human's.
 // The transition is one-way: there is no path back, because the machine text
 // is retained separately rather than overwritten.
+//
+// This one IS the library's own: it is provenance of the text this package
+// stores, and G1 (a correction must not change the pid) is defined in terms
+// of it. It is not a domain classification.
 type Provenance string
 
 const (
 	ProvenanceMachine        Provenance = "machine"
 	ProvenanceHumanCorrected Provenance = "human_corrected"
-)
-
-// SpeakerSource may never be "machine".
-type SpeakerSource string
-
-const (
-	SpeakerHuman        SpeakerSource = "human"
-	SpeakerUnattributed SpeakerSource = "unattributed"
 )
 
 // SourceRef is where a passage was last seen.
@@ -73,26 +77,55 @@ type SourceRef struct {
 // Record is one passage. Field order is the serialisation order and is fixed,
 // so re-writing an unchanged registry is byte-identical.
 type Record struct {
-	PID         PID       `json:"pid"`
-	Kind        Kind      `json:"kind"`
-	ChapterSlug *string   `json:"chapter_slug"`
-	SourceRef   SourceRef `json:"source_ref"`
-	Text        string    `json:"text"`
+	PID  PID  `json:"pid"`
+	Kind Kind `json:"kind"`
+
+	// Scope is a CONSUMER-DEFINED grouping key, opaque to this package.
+	//
+	// It exists because grouping is a real storage need — the derived database
+	// indexes on it — while the NAME of the group is not this library's
+	// business. A consumer that groups by book section, by case file, by
+	// meeting or by package puts its own key here; this package only stores,
+	// indexes and returns it.
+	Scope *string `json:"scope"`
+
+	// ScopeOrder is a CONSUMER-DEFINED sort key WITHIN Scope, opaque to this
+	// package. It is the second column of the passages_by_scope index, so a
+	// consumer can page through a group in its own order without this package
+	// knowing what that order means.
+	ScopeOrder *float64 `json:"scope_order"`
+
+	SourceRef SourceRef `json:"source_ref"`
+	Text      string    `json:"text"`
 
 	// MachineText is written once and NEVER mutated. A correction adds to the
 	// correction overlay and updates Text; this field is untouched. Deleting
-	// it would destroy the ability to re-measure transcription accuracy later.
+	// it would destroy the ability to re-measure producer accuracy later.
 	MachineText string `json:"machine_text"`
 
-	Provenance      Provenance     `json:"provenance"`
-	Confidence      *float64       `json:"confidence"`
-	Uncertain       bool           `json:"uncertain"`
-	UncertainReason *string        `json:"uncertain_reason"`
-	TStartS         *float64       `json:"t_start_s"`
-	TEndS           *float64       `json:"t_end_s"`
-	Speaker         *string        `json:"speaker"`
-	SpeakerSource   *SpeakerSource `json:"speaker_source"`
-	Redacted        bool           `json:"redacted"`
+	Provenance      Provenance `json:"provenance"`
+	Confidence      *float64   `json:"confidence"`
+	Uncertain       bool       `json:"uncertain"`
+	UncertainReason *string    `json:"uncertain_reason"`
+
+	// Attrs is CONSUMER-OWNED metadata. This package stores it, serialises it
+	// and hands it back; it never reads a key, never validates a value against
+	// a vocabulary, and never behaves differently because of one.
+	//
+	// It is map[string]string, not map[string]any, deliberately. passages.jsonl
+	// is a source of truth that must re-write BYTE-IDENTICALLY and must diff
+	// cleanly in a pull request. A JSON number round-trips through `any` as a
+	// float64, so 512.0 comes back as `512` and a large integer loses
+	// precision — an unchanged registry would then produce a changed file. A
+	// consumer that needs a number formats it (strconv.FormatFloat with
+	// precision -1 round-trips exactly) or puts it in ScopeOrder, which IS
+	// typed.
+	//
+	// Keys must be non-empty and must not collide with a reserved name; see
+	// reservedAttrKeys.
+	Attrs map[string]string `json:"attrs"`
+
+	Redacted bool `json:"redacted"`
 
 	// ContentHash is CHANGE DETECTION ONLY and is deliberately NOT identity.
 	//
@@ -118,13 +151,44 @@ type Record struct {
 	IngestRun *string `json:"ingest_run"`
 }
 
-// Validate enforces the field-level invariants.
+// reservedAttrKeys are the metadata names this package emits from Metadata().
+// An Attrs key may not use one, so a consumer's own value can never be
+// silently overwritten by a library-owned one, or vice versa. A collision that
+// resolves by "one of them wins" is the confident-but-wrong outcome; refusing
+// the record is the honest one.
+var reservedAttrKeys = map[string]bool{
+	"kind": true, "scope": true, "scope_order": true,
+	"path": true, "line_start": true, "line_end": true, "symbol": true,
+	"provenance": true, "content_hash": true, "redacted": true,
+}
+
+// Validate enforces the field-level invariants THIS PACKAGE OWNS.
+//
+// It deliberately enforces nothing about what a passage means. Rules of the
+// form "a passage of kind X requires field Y" are domain rules and belong to
+// the consumer; Registry.WithRecordValidator is the seam that runs them at
+// this same choke point, so moving them out of here does not move them out of
+// the write path.
 func (r Record) Validate() error {
 	if !r.PID.Valid() {
 		return fmt.Errorf("%w: %q", ErrInvalidPID, r.PID)
 	}
-	if !r.Kind.valid() {
-		return fmt.Errorf("passage: unknown kind %q", r.Kind)
+	if !r.Kind.Valid() {
+		return fmt.Errorf("passage: kind %q is not a well-formed token "+
+			"(lowercase ASCII letters, digits and underscores, starting with a letter, "+
+			"1-64 characters); this package does not enumerate kinds, it only requires "+
+			"that one is present and storable", r.Kind)
+	}
+	for k := range r.Attrs {
+		if k == "" {
+			return errors.New("passage: attrs carries an empty key; an attribute that " +
+				"cannot be named cannot be read back")
+		}
+		if reservedAttrKeys[k] {
+			return fmt.Errorf("passage: attrs key %q is reserved by this package "+
+				"(see reservedAttrKeys); choose another name so neither value is "+
+				"silently discarded", k)
+		}
 	}
 	if r.SourceRef.Path == "" {
 		return errors.New("passage: source_ref.path is empty")
@@ -152,31 +216,54 @@ func (r Record) Validate() error {
 	if r.Uncertain != (r.UncertainReason != nil) { // F3
 		return errors.New("passage: uncertain and uncertain_reason must be set together")
 	}
-	if r.Speaker != nil { // F4
-		if r.SpeakerSource == nil || *r.SpeakerSource != SpeakerHuman {
-			return errors.New("passage: a speaker may only be human-attributed; " +
-				"machine diarization is not available and must never be claimed")
-		}
-	}
-	if r.SpeakerSource != nil && *r.SpeakerSource != SpeakerHuman && *r.SpeakerSource != SpeakerUnattributed {
-		return fmt.Errorf("passage: speaker_source %q is not permitted", *r.SpeakerSource)
-	}
-	if r.Kind == KindTranscript { // F5
-		if r.TStartS == nil || r.TEndS == nil {
-			return errors.New("passage: a transcript passage requires t_start_s and t_end_s")
-		}
-		if *r.TStartS >= *r.TEndS {
-			return fmt.Errorf("passage: t_start_s %v is not before t_end_s %v", *r.TStartS, *r.TEndS)
-		}
-	} else if r.TStartS != nil || r.TEndS != nil {
-		return fmt.Errorf("passage: kind %q must not carry timestamps", r.Kind)
-	}
 	return nil
+}
+
+// Metadata renders the record's library-owned facts plus its consumer-owned
+// Attrs as one flat map.
+//
+// It exists so this package COMPOSES with a retrieval document type without
+// depending on one. A retriever document of the common shape
+// {ID, Content, Metadata, Score, Source} is filled in four lines:
+//
+//	doc.ID       = string(rec.PID)      // the minted pid IS the citable id
+//	doc.Content  = rec.Public().Text    // Public() so a redacted row carries none
+//	doc.Metadata = rec.Metadata()
+//	doc.Source   = rec.SourceRef.Path
+//
+// Score belongs to the retriever and is none of this package's business.
+// Nothing of that document type is imported, referenced or reimplemented here;
+// only the shape is met.
+//
+// The library-owned keys are exactly reservedAttrKeys, which Validate refuses
+// as Attrs keys, so no consumer value is ever shadowed.
+func (r Record) Metadata() map[string]any {
+	m := make(map[string]any, len(r.Attrs)+len(reservedAttrKeys))
+	for k, v := range r.Attrs {
+		m[k] = v
+	}
+	m["kind"] = string(r.Kind)
+	if r.Scope != nil {
+		m["scope"] = *r.Scope
+	}
+	if r.ScopeOrder != nil {
+		m["scope_order"] = *r.ScopeOrder
+	}
+	m["path"] = r.SourceRef.Path
+	m["line_start"] = r.SourceRef.LineStart
+	m["line_end"] = r.SourceRef.LineEnd
+	if r.SourceRef.Symbol != nil {
+		m["symbol"] = *r.SourceRef.Symbol
+	}
+	m["provenance"] = string(r.Provenance)
+	m["content_hash"] = r.ContentHash
+	m["redacted"] = r.Redacted
+	return m
 }
 
 // Public returns the record as it may leave the registry. A redacted passage
 // carries NO text and NO machine_text at any layer (F6) — not merely in the
-// rendered transcript.
+// rendered view.
 func (r Record) Public() Record {
 	if r.Redacted {
 		r.Text = ""
@@ -272,19 +359,66 @@ type Registry struct {
 	// how "the registry could not be read" is represented as a value rather
 	// than as a nil map that silently answers "not found".
 	unavailable error
+	// domain is the consumer's own record check, run at the same choke point
+	// as Validate. Nil means the consumer has none.
+	domain func(Record) error
+}
+
+// RegistryOption configures a Registry.
+type RegistryOption func(*Registry)
+
+// WithRecordValidator installs the CONSUMER's domain invariants on this
+// registry's write path.
+//
+// It exists so that removing domain rules from this package does not remove
+// them from the pipeline. Rules like "a passage of my kind X must carry a
+// start and an end offset", or "an attributed name may only come from a human,
+// because my producer cannot attribute one and must never claim to", are true
+// and worth enforcing — they are simply not true of every consumer, so they
+// cannot live here. Install them and they run on every Put, every Sync and
+// every LoadJSONL, exactly where the package's own checks run.
+//
+// The function must be pure and must not retain the Record.
+func WithRecordValidator(fn func(Record) error) RegistryOption {
+	return func(r *Registry) { r.domain = fn }
 }
 
 // NewRegistry returns an empty, readable registry.
-func NewRegistry() *Registry { return &Registry{rows: map[PID]Record{}} }
+func NewRegistry(opts ...RegistryOption) *Registry {
+	r := &Registry{rows: map[PID]Record{}}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
 
 // Unavailable returns a Registry that resolves everything as undetermined.
 // Use it when the store could not be opened, so callers cannot accidentally
 // serve "no such passage" for "I could not look".
-func Unavailable(reason error) *Registry {
+func Unavailable(reason error, opts ...RegistryOption) *Registry {
 	if reason == nil {
 		reason = errors.New("passage: registry unavailable")
 	}
-	return &Registry{rows: map[PID]Record{}, unavailable: reason}
+	r := &Registry{rows: map[PID]Record{}, unavailable: reason}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
+
+// validate runs this package's invariants and then the consumer's, in that
+// order. Every write path goes through it; there is no second door.
+func (r *Registry) validate(rec Record) error {
+	if err := rec.Validate(); err != nil {
+		return err
+	}
+	if r.domain != nil {
+		if err := r.domain(rec); err != nil {
+			return fmt.Errorf("passage: %s rejected by the consumer's record validator: %w",
+				rec.PID, err)
+		}
+	}
+	return nil
 }
 
 // Len is the number of rows.
@@ -356,7 +490,7 @@ func (r *Registry) Put(rec Record) error {
 	if r.unavailable != nil {
 		return fmt.Errorf("passage: registry unavailable: %w", r.unavailable)
 	}
-	if err := rec.Validate(); err != nil {
+	if err := r.validate(rec); err != nil {
 		return err
 	}
 	if prev, ok := r.rows[rec.PID]; ok {
@@ -379,19 +513,43 @@ func (r *Registry) Put(rec Record) error {
 // LoadJSONL reads a registry. A read failure returns an error; callers that
 // must keep serving should wrap it with Unavailable so resolution reports
 // undetermined rather than "not found".
-func LoadJSONL(path string) (*Registry, error) {
+//
+// A key this package does not define is REFUSED, not ignored.
+//
+// That is the opposite of encoding/json's default, and deliberately so.
+// passages.jsonl is a source of truth; an unknown key in it is data somebody
+// meant to keep, and dropping it silently is a corpus that loses content with
+// no error, no exit code and no visible symptom — the same shape of failure the
+// whole package exists to argue against. It is also what makes the v0.1 -> v0.2
+// break SAFE: a row written when this package still owned a consumer's field
+// names stops the load and says which key, rather than loading successfully
+// minus whatever those fields carried.
+//
+// This rule is stated generically and needs no list of retired names. The
+// offending key is reported from the DATA, which is both more useful to whoever
+// has to fix the file and the reason this package does not have to write a
+// consumer's vocabulary into its own source in order to reject it.
+//
+// Options are applied to the registry being built, so a consumer's record
+// validator runs over every loaded row rather than only over rows it writes.
+func LoadJSONL(path string, opts ...RegistryOption) (*Registry, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	reg := NewRegistry()
+	reg := NewRegistry(opts...)
 	for i, line := range strings.Split(string(b), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.DisallowUnknownFields()
 		var rec Record
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
+		if err := dec.Decode(&rec); err != nil {
+			return nil, fmt.Errorf("%s:%d: %w; a key this package does not define is refused "+
+				"rather than dropped — carry consumer-owned data in `attrs`, `scope` or "+
+				"`scope_order`, which are stored verbatim and never interpreted",
+				path, i+1, err)
 		}
 		if err := reg.Put(rec); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", path, i+1, err)
@@ -429,9 +587,8 @@ func (r *Registry) WriteJSONL(path string) error {
 // ---------------------------------------------------------------------------
 
 // Observation is a passage as observed in an artifact during a scan. A
-// producer with real structure (a transcript pipeline that knows its segment
-// boundaries and timestamps) builds these itself; Blocks builds them for plain
-// prose.
+// producer with real structure — one that already knows its own segment
+// boundaries — builds these itself; Blocks builds them for plain prose.
 type Observation struct {
 	// Anchor is the pid read out of the artifact, if any.
 	Anchor    PID
@@ -441,10 +598,14 @@ type Observation struct {
 	Text string
 	Ref  SourceRef
 
-	ChapterSlug *string
-	TStartS     *float64
-	TEndS       *float64
-	Confidence  *float64
+	// Scope, ScopeOrder and Attrs are consumer-owned and are carried through
+	// to a newly minted Record verbatim. See the fields of the same name on
+	// Record for what this package does and does not do with them.
+	Scope      *string
+	ScopeOrder *float64
+	Attrs      map[string]string
+
+	Confidence *float64
 }
 
 // KeyStrategy decides how an Observation attaches to an existing row.
@@ -590,14 +751,14 @@ func (r *Registry) Sync(obs []Observation, m *Minter, opts ...SyncOption) (SyncR
 		rec := Record{
 			PID:         newPID,
 			Kind:        o.Kind,
-			ChapterSlug: o.ChapterSlug,
+			Scope:       o.Scope,
+			ScopeOrder:  o.ScopeOrder,
 			SourceRef:   o.Ref,
 			Text:        o.Text,
 			MachineText: o.Text,
 			Provenance:  ProvenanceMachine,
 			Confidence:  o.Confidence,
-			TStartS:     o.TStartS,
-			TEndS:       o.TEndS,
+			Attrs:       o.Attrs,
 			ContentHash: ContentHash(o.Text),
 			MintedAt:    cfg.now().UTC().Format(time.RFC3339),
 			IngestRun:   cfg.run,
@@ -615,7 +776,7 @@ func (r *Registry) Sync(obs []Observation, m *Minter, opts ...SyncOption) (SyncR
 // check that Put applies to externally supplied records. Sync preserves
 // MachineText itself; this exists so an updated SourceRef is not rejected.
 func (r *Registry) putForce(rec Record) error {
-	if err := rec.Validate(); err != nil {
+	if err := r.validate(rec); err != nil {
 		return err
 	}
 	r.rows[rec.PID] = rec
@@ -626,18 +787,22 @@ func (r *Registry) putForce(rec Record) error {
 // write anchors back for newly minted pids, and re-derive every source_ref
 // from the file as it now stands.
 //
+// The kind is SUPPLIED BY THE CALLER and is never inferred. An earlier version
+// guessed it from the file extension, which meant this package decided what a
+// consumer's `.mmd` file *is* — a classification it has no way to know and no
+// business making. Passing it in is one more argument and one less guess.
+//
 // The file is rewritten ONLY when an anchor had to be added or corrected, so a
 // second run over unchanged input leaves every source file byte-identical.
-func (r *Registry) SyncFile(path string, m *Minter, opts ...SyncOption) (SyncResult, error) {
+func (r *Registry) SyncFile(path string, kind Kind, m *Minter, opts ...SyncOption) (SyncResult, error) {
 	syn, ok := SyntaxForPath(path)
 	if !ok {
 		return SyncResult{}, fmt.Errorf("passage: %s has no inline anchor syntax; "+
 			"use Sync with sidecar or registry-only observations", path)
 	}
-	kind := KindDocSection
-	if strings.HasSuffix(strings.ToLower(path), ".mmd") ||
-		strings.HasSuffix(strings.ToLower(path), ".puml") {
-		kind = KindDiagram
+	if !kind.Valid() {
+		return SyncResult{}, fmt.Errorf("passage: %q is not a well-formed kind token; "+
+			"SyncFile does not infer one", kind)
 	}
 
 	src, err := os.ReadFile(path)
@@ -675,16 +840,17 @@ func (r *Registry) SyncFile(path string, m *Minter, opts ...SyncOption) (SyncRes
 	// The refresh is a direct anchor->position update, NOT another matching
 	// pass. Every block now carries the anchor this sync assigned it, so the
 	// mapping is a lookup with no strategy involved and nothing to re-mint.
-	if err := r.refreshPositions(out, syn, path); err != nil {
+	if err := r.refreshPositions(out, syn, path, kind); err != nil {
 		return res, err
 	}
 	return res, nil
 }
 
 // refreshPositions re-derives every anchored block's source_ref from the file
-// as it now stands on disk.
-func (r *Registry) refreshPositions(src []byte, syn Syntax, path string) error {
-	obs, err := Blocks(src, syn, path, KindDocSection)
+// as it now stands on disk. The kind is passed through only because Blocks
+// requires one; nothing here reads it.
+func (r *Registry) refreshPositions(src []byte, syn Syntax, path string, kind Kind) error {
+	obs, err := Blocks(src, syn, path, kind)
 	if err != nil {
 		return err
 	}
@@ -708,14 +874,45 @@ func (r *Registry) refreshPositions(src []byte, syn Syntax, path string) error {
 // passages.db — derived, rebuildable, never authoritative
 // ---------------------------------------------------------------------------
 
-// schemaSQL is the normative schema. content_hash appears in no primary key,
-// no unique index and no foreign key — a property asserted behaviourally by
-// storing two passages that share one, not by grepping this text.
+// schemaVersion is stamped into the file's PRAGMA user_version.
+//
+//	1  the original schema. It named one consuming application's subject
+//	   matter in four places: two closed CHECK vocabularies, two columns and
+//	   one index.
+//	2  those five are gone. Classification and grouping are now the generic
+//	   `kind`, `scope` and `scope_order` columns with no CHECK vocabulary
+//	   between them, everything else consumer-owned lives in the opaque
+//	   `attrs` JSON column, and the grouping index is `passages_by_scope`.
+//
+// The v1 names are NOT recited here. Reciting them would put the vocabulary
+// back into this module's source to document its own removal, and the guard
+// family in decoupling_test.go would be right to fail on it. They belong in
+// the release note, which is written for whoever has to migrate, and the
+// runtime errors in ensureSchema and LoadJSONL name the offending object or
+// key from the FILE — which is the copy that matters.
+const schemaVersion = 2
+
+// schemaSQL is the normative schema.
+//
+// Two properties are load-bearing and both are asserted BEHAVIOURALLY rather
+// than by grepping this text, because a grep stays green when a migration adds
+// the constraint elsewhere:
+//
+//   - content_hash appears in no primary key, no unique index and no foreign
+//     key — proven by storing two passages that share one.
+//   - `kind` and `crossrefs.relation` carry NO closed CHECK vocabulary — proven
+//     by storing a kind this package has never heard of. A CHECK listing
+//     members would be this library enumerating its consumer's domain in DDL,
+//     which is the same defect as an enum in Go with extra steps.
+//
+// `attrs` holds a consumer-owned JSON object. This package writes it, reads it
+// back and indexes nothing inside it.
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS passages (
   pid              TEXT PRIMARY KEY,
-  kind             TEXT NOT NULL CHECK (kind IN ('transcript','doc_section','code','diagram')),
-  chapter_slug     TEXT,
+  kind             TEXT NOT NULL,
+  scope            TEXT,
+  scope_order      REAL,
   path             TEXT NOT NULL,
   line_start       INTEGER, line_end INTEGER,
   symbol           TEXT,
@@ -726,15 +923,13 @@ CREATE TABLE IF NOT EXISTS passages (
   confidence       REAL,
   uncertain        INTEGER NOT NULL DEFAULT 0,
   uncertain_reason TEXT,
-  t_start_s        REAL, t_end_s REAL,
-  speaker          TEXT,
-  speaker_source   TEXT CHECK (speaker_source IN ('human','unattributed')),
+  attrs            TEXT,
   redacted         INTEGER NOT NULL DEFAULT 0,
   content_hash     TEXT NOT NULL,
   minted_at        TEXT NOT NULL,
   ingest_run       TEXT
 );
-CREATE INDEX IF NOT EXISTS passages_by_chapter ON passages(chapter_slug, t_start_s);
+CREATE INDEX IF NOT EXISTS passages_by_scope ON passages(scope, scope_order);
 CREATE INDEX IF NOT EXISTS passages_by_path    ON passages(path, line_start);
 CREATE UNIQUE INDEX IF NOT EXISTS passages_symbol_key ON passages(path, symbol) WHERE symbol IS NOT NULL;
 
@@ -760,7 +955,7 @@ CREATE TABLE IF NOT EXISTS redactions (
 CREATE TABLE IF NOT EXISTS crossrefs (
   from_pid   TEXT NOT NULL REFERENCES passages(pid),
   to_pid     TEXT NOT NULL REFERENCES passages(pid),
-  relation   TEXT NOT NULL CHECK (relation IN ('explains','demonstrates','continues','related')),
+  relation   TEXT NOT NULL,
   origin     TEXT NOT NULL CHECK (origin IN ('derived','authored')),
   score      REAL,
   generation INTEGER,
@@ -820,8 +1015,8 @@ func (r *Registry) BuildDB(ctx context.Context, path string) error {
 	}
 	defer db.Close()
 
-	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("passage: creating schema: %w", err)
+	if err := ensureSchema(ctx, db, path); err != nil {
+		return err
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -835,10 +1030,10 @@ func (r *Registry) BuildDB(ctx context.Context, path string) error {
 		}
 	}
 	ins, err := tx.PrepareContext(ctx, `INSERT INTO passages
-	  (pid,kind,chapter_slug,path,line_start,line_end,symbol,anchor,text,machine_text,
-	   provenance,confidence,uncertain,uncertain_reason,t_start_s,t_end_s,speaker,
-	   speaker_source,redacted,content_hash,minted_at,ingest_run)
-	  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+	  (pid,kind,scope,scope_order,path,line_start,line_end,symbol,anchor,text,machine_text,
+	   provenance,confidence,uncertain,uncertain_reason,attrs,
+	   redacted,content_hash,minted_at,ingest_run)
+	  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -858,12 +1053,21 @@ func (r *Registry) BuildDB(ctx context.Context, path string) error {
 		if pub.MachineText != "" {
 			machine = pub.MachineText
 		}
+		var attrs any
+		if len(rec.Attrs) > 0 {
+			// encoding/json sorts map keys, so the stored blob is stable
+			// across rebuilds of the same registry.
+			b, err := json.Marshal(rec.Attrs)
+			if err != nil {
+				return fmt.Errorf("passage: encoding attrs for %s: %w", rec.PID, err)
+			}
+			attrs = string(b)
+		}
 		if _, err := ins.ExecContext(ctx,
-			string(rec.PID), string(rec.Kind), rec.ChapterSlug, rec.SourceRef.Path,
+			string(rec.PID), string(rec.Kind), rec.Scope, rec.ScopeOrder, rec.SourceRef.Path,
 			rec.SourceRef.LineStart, rec.SourceRef.LineEnd, rec.SourceRef.Symbol,
 			string(rec.SourceRef.Anchor), text, machine, string(rec.Provenance),
-			rec.Confidence, boolInt(rec.Uncertain), rec.UncertainReason,
-			rec.TStartS, rec.TEndS, rec.Speaker, rec.SpeakerSource,
+			rec.Confidence, boolInt(rec.Uncertain), rec.UncertainReason, attrs,
 			boolInt(rec.Redacted), rec.ContentHash, rec.MintedAt, rec.IngestRun,
 		); err != nil {
 			return fmt.Errorf("passage: inserting %s: %w", rec.PID, err)
@@ -876,6 +1080,63 @@ func (r *Registry) BuildDB(ctx context.Context, path string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ensureSchema creates the schema in a fresh file, accepts a file already at
+// the current version, and REFUSES anything else.
+//
+// The refusal is deliberate and is the honest half of the clean break. This
+// database is a derived cache and is rebuilt wholesale rather than migrated,
+// so the tempting move is to drop and recreate whatever is there. But the file
+// also declares tables this package never writes — corrections, redactions,
+// crossrefs, symbol_aliases, generations — and dropping a consumer's rows out
+// of them to satisfy a schema change would be destroying data on a guess.
+//
+// This package cannot determine whether that is safe, so it does not decide.
+// It stops, names the file, names the versions, and names the remedy: delete
+// the derived database and rebuild it from passages.jsonl, which is the source
+// of truth and always wins a disagreement.
+func ensureSchema(ctx context.Context, db *sql.DB, path string) error {
+	var have int
+	if err := db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&have); err != nil {
+		return fmt.Errorf("passage: reading schema version of %s: %w", path, err)
+	}
+	switch {
+	case have == schemaVersion:
+		// Already current. Re-running the CREATE ... IF NOT EXISTS statements
+		// is a no-op and keeps a partially built file honest.
+	case have == 0:
+		// Either a brand-new file or one written before versions were
+		// stamped. The two are told apart by whether the table is already
+		// there — an unstamped file that already holds `passages` is a v1
+		// file, not a fresh one, and its columns do not match.
+		var n int
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='passages'`,
+		).Scan(&n); err != nil {
+			return fmt.Errorf("passage: inspecting %s: %w", path, err)
+		}
+		if n > 0 {
+			return fmt.Errorf("passage: %s carries an unstamped `passages` table, so it was "+
+				"built by schema v1 (before PRAGMA user_version was set); this package now "+
+				"writes v%d and the columns differ. The derived database is a cache: delete "+
+				"it and rebuild from passages.jsonl. Refusing to drop tables this package "+
+				"does not write", path, schemaVersion)
+		}
+	default:
+		return fmt.Errorf("passage: %s is at schema v%d and this package writes v%d; "+
+			"the derived database is a cache: delete it and rebuild from passages.jsonl. "+
+			"Refusing to drop tables this package does not write", path, have, schemaVersion)
+	}
+	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
+		return fmt.Errorf("passage: creating schema: %w", err)
+	}
+	// PRAGMA does not accept a bound parameter; schemaVersion is an untainted
+	// package constant.
+	if _, err := db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("passage: stamping schema version on %s: %w", path, err)
+	}
+	return nil
 }
 
 func boolInt(b bool) int {

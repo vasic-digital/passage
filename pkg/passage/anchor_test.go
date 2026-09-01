@@ -53,7 +53,7 @@ func TestPerFormatAnchorSyntax(t *testing.T) {
 		path string
 		want string
 	}{
-		{"a/b/transcript.md", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
+		{"a/b/doc.md", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
 		{"a/b/page.html", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
 		{"a/b/flow.mmd", "%% pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA"},
 		{"a/b/seq.puml", "' pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA"},
@@ -139,7 +139,7 @@ func TestBlocksCarryTheirAnchorAndLineRange(t *testing.T) {
 		"block two, unanchored",
 		"",
 	}, "\n")
-	obs, err := Blocks([]byte(doc), SyntaxHTML, "t.md", KindDocSection)
+	obs, err := Blocks([]byte(doc), SyntaxHTML, "t.md", fixtureKind)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,18 +42,40 @@ Stable identity for citable spans of text: ULIDs minted once at ingest that
 survive both text correction and line-position shifts, three anchor modes, and
 a registry whose resolution is three-valued. See [README.md](README.md).
 
-**It is project-not-aware, and that is enforced rather than promised.** It is a
-separate Go module, so it does not require any consumer and no consumer-shaped
-symbol can appear here even by accident. The test suite asserts it.
+**It is project-not-aware, and the enforcement is named rather than implied.**
+The module boundary is NOT what enforces it. Being a separate Go module keeps a
+consuming project's *code* out; it is no barrier at all to its *vocabulary*,
+which needs no import, no require line and no build-graph edge — someone types
+it into a struct field. For this module's first two releases the only guard
+read `go.mod`, while the API underneath it carried a consumer's nouns in a
+struct field, a JSON tag, a closed enum, a SQL column and an index name. What
+enforces the claim now is the guard family in
+`pkg/passage/decoupling_test.go`, which reads this module's own source,
+comments, struct tags and the schema as the built database reports it, and each
+of whose gates ships with a mutation that has been observed to make it fail.
 
 ## Module-local rules
 
 These extend the inherited rules; they never weaken them.
 
-1. **No consumer-shaped symbol, ever.** No type, field, constant or fixture may
-   name a concept belonging to a consuming application. If a consumer needs
-   something expressed here, it is expressed in this module's own generic
-   vocabulary or it stays in the consumer.
+1. **No consumer-shaped symbol, ever.** No type, field, constant, struct tag,
+   column, index, file name, fixture or doc comment may name a concept
+   belonging to a consuming application. If a consumer needs something
+   expressed here, it is expressed in this module's own generic vocabulary —
+   `Kind`, `Scope`, `ScopeOrder` and `Attrs` exist for exactly that — or it
+   stays in the consumer.
+
+   This is machine-checked, not reviewed: `consumerVocabulary` in
+   `pkg/passage/decoupling_test.go` is the dictionary, the corpus is derived by
+   walking the tree rather than listed, and the exemption list holds exactly
+   one file (the one that has to contain the dictionary). Prose is in scope
+   alongside code, because the violation this rule was written for was a doc
+   comment promising decoupling in the consumer's own words while the struct
+   beneath it delivered the opposite.
+
+   Domain rules that a consumer genuinely needs enforced do not disappear with
+   the vocabulary: `Registry.WithRecordValidator` runs the consumer's own
+   invariants at the same choke point this package's run.
 
 2. **Fixtures are synthetic.** This repository is public. No fixture may
    contain material derived from any private corpus, any real recording, any
