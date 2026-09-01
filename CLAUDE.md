@@ -1,8 +1,6 @@
 # CLAUDE.md — passage
 
-Carrier read by Claude Code (claude.ai/code). One of the four governance
-carriers §11.4.157 requires to be maintained in lockstep; everything below
-the next heading is byte-identical across all four.
+This carrier is read by Claude Code (claude.ai/code). It is one of the four governance carriers §11.4.157 requires to be maintained in lockstep; every line below this one is byte-identical across all four, once each carrier's own name is normalised.
 
 ## INHERITED FROM constitution/CLAUDE.md
 
@@ -21,28 +19,28 @@ the module-local rules below apply**.
 
 ### Locating the base file: a resolver, never a path
 
-`constitution/CLAUDE.md` above is the **canonical name** of the base file,
-written as the constitution's own examples write it. It is not a filesystem
-path relative to this module and must not be rewritten into one: a consuming
-project may mount the constitution at `constitution/` or at
+`constitution/CLAUDE.md` above is the **canonical name** of the base file, written
+as the constitution's own examples write it. It is not a filesystem path
+relative to this module and must not be rewritten into one: a consuming project
+may mount the constitution at `constitution/` or at
 `submodules/constitution/`, and this module cannot know which. Resolve it by
 walking parents:
 
 ```bash
-bash "$(git rev-parse --show-toplevel)/submodules/constitution/find_constitution.sh" 2>/dev/null \
-  || bash "$(git rev-parse --show-toplevel)/constitution/find_constitution.sh" 2>/dev/null \
+root=$(git rev-parse --show-toplevel)
+bash "$root/submodules/constitution/find_constitution.sh" 2>/dev/null \
+  || bash "$root/constitution/find_constitution.sh" 2>/dev/null \
   || echo "standalone — no constitution in scope"
 ```
 
 Read the canonical text on demand, never eagerly: the corpus is large, and a
-native `@import` would load it into every session before any work begins.
+native import would load it into every session before any work begins.
 
 ## What this module is
 
-Stable identity for citable spans of text: ULIDs minted once
-at ingest that survive both text correction and line-position shifts, three
-anchor modes, and a registry whose resolution is three-valued. See
-[README.md](README.md).
+Stable identity for citable spans of text: ULIDs minted once at ingest that
+survive both text correction and line-position shifts, three anchor modes, and
+a registry whose resolution is three-valued. See [README.md](README.md).
 
 **It is project-not-aware, and that is enforced rather than promised.** It is a
 separate Go module, so it does not require any consumer and no consumer-shaped
@@ -59,8 +57,8 @@ These extend the inherited rules; they never weaken them.
 
 2. **Fixtures are synthetic.** This repository is public. No fixture may
    contain material derived from any private corpus, any real recording, any
-   real transcript, or any identifiable person's name or speech. Synthetic
-   test data only — no exceptions, and no "it is only a test file".
+   real transcript, or any identifiable person's name or speech. Synthetic test
+   data only — no exceptions, and no "it is only a test file".
 
 3. **Dependencies are load-bearing or absent.** Every `require` line must
    justify itself in the `go.mod` comment block. Convenience is not a
