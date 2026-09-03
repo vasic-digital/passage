@@ -207,7 +207,17 @@ func (r Record) Validate() error {
 	switch r.Provenance {
 	case ProvenanceMachine:
 	case ProvenanceHumanCorrected: // F2
-		if r.MachineText == "" {
+		// F2 requires the machine layer to be retained so producer accuracy can
+		// be re-measured later. F6 requires a SUPPRESSED row to carry no
+		// machine layer at all. The two are in genuine tension and the tension
+		// is resolved in F6's favour, deliberately and narrowly: suppression is
+		// an explicit decision to destroy that evidence, and refusing the row
+		// would make F2 an obstacle to the one operation privacy demands.
+		//
+		// The exemption only ever LOOSENS: a suppressed row that still carries
+		// its machine layer stays valid, so nothing that passes today starts
+		// failing. See RedactionLog.Purge for the caller that needs it.
+		if r.MachineText == "" && !r.Redacted {
 			return errors.New("passage: human_corrected requires machine_text to be retained")
 		}
 	default:
@@ -1088,9 +1098,14 @@ func (r *Registry) BuildDB(ctx context.Context, path string) error {
 // The refusal is deliberate and is the honest half of the clean break. This
 // database is a derived cache and is rebuilt wholesale rather than migrated,
 // so the tempting move is to drop and recreate whatever is there. But the file
-// also declares tables this package never writes — corrections, redactions,
-// crossrefs, symbol_aliases, generations — and dropping a consumer's rows out
-// of them to satisfy a schema change would be destroying data on a guess.
+// also declares tables this package never writes — corrections, crossrefs,
+// symbol_aliases, generations — and dropping a consumer's rows out of them to
+// satisfy a schema change would be destroying data on a guess.
+//
+// `redactions` used to be on that list and no longer is: RedactionLog.SyncDB
+// rebuilds it wholesale from the append-only log file, which is its source of
+// truth. It is still not safe to drop here, for the same reason as the others —
+// this function cannot tell whether the log file is present to rebuild from.
 //
 // This package cannot determine whether that is safe, so it does not decide.
 // It stops, names the file, names the versions, and names the remedy: delete
