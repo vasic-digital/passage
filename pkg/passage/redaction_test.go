@@ -437,3 +437,211 @@ func TestGateRED6_UnreadableLogIsAnErrorAndAbsentLogIsEmpty(t *testing.T) {
 			"'nothing is suppressed', which is the exact collapse of state 2 into state 0")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// G-RED-7 — a re-scan can never write text back onto a suppressed row.
+//
+// THE DEFECT THIS GATE WAS WRITTEN FOR, as measured rather than imagined:
+// Sync's attach branch assigned `rec.Text = o.Text` with nothing reading
+// Redacted. A suppression was therefore reversible by accident — re-run the
+// ingest over an artifact that still carries the words, and the registry has
+// them again, reported as `Corrected`, with a success exit code.
+//
+// It had never fired in the consuming tree ONLY because suppression there is a
+// flag rather than a rewrite, so the observed text equalled the stored text and
+// the assignment was a no-op. The fixtures below are the two shapes where that
+// luck runs out: a PURGED row (stored text empty, artifact text present) and a
+// row whose artifact was re-rendered with the span replaced.
+// ---------------------------------------------------------------------------
+
+// suppress appends a redact entry for p and materialises it.
+func suppress(t *testing.T, reg *Registry, p PID) *RedactionLog {
+	t.Helper()
+	log := NewRedactionLog()
+	if _, _, err := log.Append(reg, p, ActionRedact, "fixture_reason",
+		"fixture-operator", testClock()); err != nil {
+		t.Fatalf("appending the suppression: %v", err)
+	}
+	if _, err := log.Materialise(reg); err != nil {
+		t.Fatalf("materialising the suppression: %v", err)
+	}
+	return log
+}
+
+// resync runs the REAL Sync entry point over one observation carrying `text`
+// for the block the fixture registry minted `p` for.
+func resync(reg *Registry, p PID, text string) error {
+	_, err := reg.Sync([]Observation{{
+		Anchor: p, HasAnchor: true, Kind: Kind("prose"), Text: text,
+		Ref: SourceRef{Path: "fixture/source.md", LineStart: 1, LineEnd: 1,
+			Anchor: AnchorInline},
+	}}, NewMinter(), WithNow(testClock))
+	return err
+}
+
+func TestGateRED7_ResyncCannotUnredactAPurgedRow(t *testing.T) {
+	const original = "an invented sentence that a suppression removed"
+	reg, pids := fixtureRegistry(t, original, "an unrelated invented sentence")
+	p := pids[0]
+
+	log := suppress(t, reg, p)
+	if _, err := log.Purge(reg); err != nil {
+		t.Fatalf("purging: %v", err)
+	}
+	if rec, _ := reg.Lookup(p); rec.Text != "" || rec.MachineText != "" {
+		t.Fatalf("the fixture is not purged: text=%d machine_text=%d bytes",
+			len(rec.Text), len(rec.MachineText))
+	}
+
+	err := resync(reg, p, original)
+	if err == nil {
+		t.Fatal("UN-REDACTION: Sync accepted an observation that rewrote a purged, " +
+			"suppressed row's text. The suppression was reversed by a re-scan")
+	}
+	if !errors.Is(err, ErrSuppressedTextOverwrite) {
+		t.Fatalf("the refusal is not typed: errors.Is(err, ErrSuppressedTextOverwrite) is "+
+			"false, so a caller cannot distinguish it from any other sync failure: %v", err)
+	}
+
+	rec, ok := reg.Lookup(p)
+	if !ok {
+		t.Fatal("the row vanished")
+	}
+	if rec.Text != "" || rec.MachineText != "" {
+		t.Fatalf("the refusal did not hold: the row now carries text=%d machine_text=%d bytes",
+			len(rec.Text), len(rec.MachineText))
+	}
+	if !rec.Redacted {
+		t.Fatal("the row is no longer suppressed after a refused sync")
+	}
+}
+
+func TestGateRED7_ResyncCannotReplaceASuppressedRowsText(t *testing.T) {
+	const original = "an invented sentence that a suppression removed"
+	reg, pids := fixtureRegistry(t, original)
+	p := pids[0]
+	suppress(t, reg, p)
+
+	// The artifact was re-rendered with the span replaced. The row is
+	// suppressed but NOT purged, so it still holds the original.
+	err := resync(reg, p, "[REDACTED]")
+	if err == nil {
+		t.Fatal("Sync replaced a suppressed row's retained text from an artifact scan")
+	}
+	if !errors.Is(err, ErrSuppressedTextOverwrite) {
+		t.Fatalf("the refusal is not typed: %v", err)
+	}
+	if rec, _ := reg.Lookup(p); rec.Text != original {
+		t.Fatalf("the retained text was altered by a refused sync (%d bytes now)", len(rec.Text))
+	}
+}
+
+func TestGateRED7_PutIsGuardedTheSameWay(t *testing.T) {
+	const original = "an invented sentence that a suppression removed"
+	reg, pids := fixtureRegistry(t, original)
+	p := pids[0]
+	suppress(t, reg, p)
+
+	rec, _ := reg.Lookup(p)
+	rec.Text = "text a second write path put back"
+	rec.ContentHash = ContentHash(rec.Text)
+	err := reg.Put(rec)
+	if err == nil {
+		t.Fatal("Put is a SECOND door onto the same row and it was open: a suppressed " +
+			"row's text was replaced without going through Sync at all")
+	}
+	if !errors.Is(err, ErrSuppressedTextOverwrite) {
+		t.Fatalf("Put's refusal is not typed: %v", err)
+	}
+	if got, _ := reg.Lookup(p); got.Text != original {
+		t.Fatalf("Put mutated the row despite refusing (%d bytes now)", len(got.Text))
+	}
+}
+
+// The guard must not turn the registry into a museum. Four writes that are
+// LEGITIMATE on a suppressed row keep working; if any of them started failing,
+// the guard would be bought at the price of the operations redaction itself
+// needs.
+func TestGateRED7_LegitimateWritesOnASuppressedRowStillWork(t *testing.T) {
+	const original = "an invented sentence that a suppression removed"
+	reg, pids := fixtureRegistry(t, original)
+	p := pids[0]
+	log := suppress(t, reg, p)
+
+	// 1. An idempotent re-sync over an UNCHANGED artifact is a no-op, not a
+	//    refusal. Without this the guard would break every ordinary ingest that
+	//    happens to touch a suppressed passage.
+	if err := resync(reg, p, original); err != nil {
+		t.Fatalf("an unchanged re-scan of a suppressed row was refused: %v", err)
+	}
+
+	// 2. Purge blanks both layers. Emptying moves TOWARD suppression and is
+	//    always accepted.
+	if _, err := log.Purge(reg); err != nil {
+		t.Fatalf("Purge was refused by the guard it must never trip: %v", err)
+	}
+
+	// 3. An `unredact` appended to the log releases the row through the ONE
+	//    path that may: the log, reviewably.
+	if _, _, err := log.Append(reg, p, ActionUnredact, "fixture_reason",
+		"fixture-operator", testClock()); err != nil {
+		t.Fatalf("appending the release: %v", err)
+	}
+	if _, err := log.Materialise(reg); err != nil {
+		t.Fatalf("materialising the release: %v", err)
+	}
+	if rec, _ := reg.Lookup(p); rec.Redacted {
+		t.Fatal("the release did not reach the row")
+	}
+
+	// 4. Once released, a re-scan may repopulate the text again. The guard is a
+	//    suppression guard, not a permanent freeze.
+	if err := resync(reg, p, original); err != nil {
+		t.Fatalf("a released row could not be re-synced: %v", err)
+	}
+	if rec, _ := reg.Lookup(p); rec.Text != original {
+		t.Fatalf("the released row did not take the re-scanned text back (%d bytes)",
+			len(rec.Text))
+	}
+}
+
+// PAIRED MUTATION for G-RED-7, in-process half. The gate above proves the guard
+// REFUSES; this proves the guard is what does the refusing, by running the
+// pre-guard algorithm verbatim against the same fixture and observing the
+// un-redaction happen. Without it, G-RED-7 could pass because Sync refuses
+// everything.
+//
+// The out-of-process half — deleting the guard from the REAL source and driving
+// the REAL Sync — is platform/gates/prove-resync-redaction-guard.sh in the
+// consuming project, which this test does not replace.
+func TestGateRED7_PairedMutation_TheUnguardedAlgorithmUnredacts(t *testing.T) {
+	const original = "an invented sentence that a suppression removed"
+	reg, pids := fixtureRegistry(t, original)
+	p := pids[0]
+	log := suppress(t, reg, p)
+	if _, err := log.Purge(reg); err != nil {
+		t.Fatalf("purging: %v", err)
+	}
+
+	// Sync's attach branch exactly as it stood before the guard existed.
+	rec, _ := reg.Lookup(p)
+	if rec.Text != original { // it is purged; the assignment below is the defect
+		rec.Text = original
+		rec.ContentHash = ContentHash(original)
+		if rec.MachineText != "" {
+			rec.Provenance = ProvenanceHumanCorrected
+		}
+	}
+	reg.rows[rec.PID] = rec // the pre-guard write: straight into the map
+
+	got, _ := reg.Lookup(p)
+	if got.Text != original {
+		t.Fatalf("the mutation did not reproduce the defect, so it proves nothing " +
+			"about the guard")
+	}
+	if !got.Redacted {
+		t.Fatal("the mutation changed the wrong thing")
+	}
+	t.Logf("MUTATION OBSERVED: without the guard, %s is suppressed AND carries %d "+
+		"characters of the text the suppression removed", p, len(got.Text))
+}

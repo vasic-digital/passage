@@ -487,12 +487,89 @@ func (r *Registry) Resolve(p PID) Resolution {
 	return Resolution{Outcome: OutcomeFound, Record: rec}
 }
 
+// ErrSuppressedTextOverwrite is returned when a write would put text onto, or
+// change the text of, a row that is currently suppressed.
+//
+// It is a DETERMINED problem, never an inability to tell: the row was found,
+// it is suppressed, and the incoming value differs. Callers may test it with
+// errors.Is and MUST NOT treat it as a skip — see guardSuppressedText.
+var ErrSuppressedTextOverwrite = errors.New(
+	"passage: refusing to write text onto a suppressed passage")
+
+// guardSuppressedText refuses a write that would REINTRODUCE text on a
+// suppressed row.
+//
+// # The hole this closes, stated as it was measured rather than as a hazard
+//
+// Sync's attach branch assigned `rec.Text = o.Text` unconditionally. Nothing
+// in it read Redacted. A re-scan of an artifact that still carries the words a
+// suppression removed therefore wrote them straight back into the registry
+// row, flipped Provenance to human_corrected, recomputed content_hash, and
+// returned a SyncResult in which that pid appears under Corrected — a success.
+// The suppression survived only as a bool nobody consulted on the write path.
+//
+// It had not yet produced a disclosure in any consuming tree ONLY because
+// suppression there is implemented as a flag rather than as a rewrite, so the
+// observed text happened to equal the stored text and the assignment happened
+// to be a no-op. That is a property of today's data, not a guarantee, and it
+// stops holding the moment a suppression rewrites the row's text (Purge does
+// exactly that) or the artifact is re-rendered with the span removed.
+//
+// # The rule, per field
+//
+// On a suppressed row a text field may keep its current value or be EMPTIED.
+// It may never be set to a different non-empty value.
+//
+// Emptying is permitted in both fields because it moves TOWARD suppression and
+// is what RedactionLog.Purge does; forbidding it would need a bypass, and a
+// bypass is a door that the next caller walks through. Keeping the value is
+// permitted so that Materialise (which only flips the bool), refreshPositions
+// (which only moves line numbers) and an idempotent re-sync over an unchanged
+// artifact all remain no-ops rather than becoming refusals.
+//
+// # What this costs, stated plainly
+//
+// A re-ingest whose artifact NO LONGER matches a suppressed row's stored text
+// now stops the whole sync instead of quietly rewriting one row. That is the
+// intended trade and it is not free: an operator who suppresses a passage and
+// then re-renders the artifact with the span removed will meet this refusal on
+// the next ingest. The remedies are all deliberate acts, which is the point —
+// exclude the artifact from the scan, release the suppression through the log
+// (an appended `unredact`, reviewable), or accept the row as it stands. None
+// of them is "the pipeline silently decided for you".
+func guardSuppressedText(prev, next Record) error {
+	if !prev.Redacted {
+		return nil
+	}
+	for _, f := range [...]struct{ name, was, now string }{
+		{"text", prev.Text, next.Text},
+		{"machine_text", prev.MachineText, next.MachineText},
+	} {
+		if f.now == f.was || f.now == "" {
+			continue
+		}
+		return fmt.Errorf("%w: %s is suppressed and its %s would be replaced with a "+
+			"different %d-character value observed at %s:%d. The suppression is the "+
+			"decision of the append-only log; a scan of an artifact is not, and this "+
+			"package will not let the second overwrite the first. Remedies, all of them "+
+			"deliberate: leave the artifact out of the scan, append an `unredact` entry "+
+			"to the log if the suppression is genuinely over, or purge the row (an empty "+
+			"value is always accepted). Nothing was written",
+			ErrSuppressedTextOverwrite, next.PID, f.name, len(f.now),
+			next.SourceRef.Path, next.SourceRef.LineStart)
+	}
+	return nil
+}
+
 // Put inserts or updates a row.
 //
 // A pid is never reused, never reassigned and never recycled (M3), so Put
 // refuses to point an existing pid at a passage in a different file or at a
 // different symbol. Updating a row in place — new text, new line numbers — is
 // the normal case and is allowed.
+//
+// A SUPPRESSED row is the one exception: its text may not be replaced. See
+// guardSuppressedText.
 func (r *Registry) Put(rec Record) error {
 	if r == nil {
 		return errors.New("passage: nil registry")
@@ -510,6 +587,9 @@ func (r *Registry) Put(rec Record) error {
 		}
 		if prev.MachineText != "" && rec.MachineText != prev.MachineText {
 			return fmt.Errorf("passage: pid %s: machine_text is immutable (F1)", rec.PID)
+		}
+		if err := guardSuppressedText(prev, rec); err != nil {
+			return err
 		}
 	}
 	r.rows[rec.PID] = rec
@@ -735,6 +815,11 @@ func (r *Registry) Sync(obs []Observation, m *Minter, opts ...SyncOption) (SyncR
 			rec.SourceRef = o.Ref
 			rec.IngestRun = cfg.run
 			if changed {
+				// THIS ASSIGNMENT WAS UNCONDITIONAL AND IS THE DEFECT
+				// guardSuppressedText was written for. It still runs for a
+				// suppressed row — the guard is at the write, in putForce
+				// below, not here — so that no future branch can reach the
+				// map by skipping a check placed at this line.
 				rec.Text = o.Text
 				rec.ContentHash = hash
 				// The machine layer is evidence and is never overwritten.
@@ -785,9 +870,22 @@ func (r *Registry) Sync(obs []Observation, m *Minter, opts ...SyncOption) (SyncR
 // putForce updates an existing row, bypassing the machine_text immutability
 // check that Put applies to externally supplied records. Sync preserves
 // MachineText itself; this exists so an updated SourceRef is not rejected.
+//
+// It does NOT bypass guardSuppressedText, and the difference is deliberate.
+// F1's immutability check is about EVIDENCE and Sync has already satisfied it
+// by construction; the suppression guard is about DISCLOSURE and has no such
+// internal caller to trust. Every write that reaches a row through this
+// function — Sync's attach branch, RedactionLog.Materialise,
+// RedactionLog.Purge, refreshPositions — passes through the same guard, so
+// there is exactly one door and no second one to forget.
 func (r *Registry) putForce(rec Record) error {
 	if err := r.validate(rec); err != nil {
 		return err
+	}
+	if prev, ok := r.rows[rec.PID]; ok {
+		if err := guardSuppressedText(prev, rec); err != nil {
+			return err
+		}
 	}
 	r.rows[rec.PID] = rec
 	return nil
