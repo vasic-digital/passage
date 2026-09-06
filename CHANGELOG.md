@@ -18,8 +18,25 @@ SQLite file written by `v0.1.x` is not readable by this release.
 
 The old guard, `TestNoConsumerShapedDependencies`, read `go.mod` and nothing
 else — it never opened a source file of the package it was vouching for. It is
-kept, and it is now one of eight gates in `pkg/passage/decoupling_test.go`,
-four of which ship a paired mutation that has been observed to fail.
+kept, and it is now one of **six** gates in the decoupling family, **four** of
+which ship a paired mutation that has been observed to fail.
+
+**Corrected 2026-09-06, by counting rather than by recollection.** This
+paragraph read "one of eight gates in `pkg/passage/decoupling_test.go`, four of
+which ship a paired mutation", and both halves were wrong at the time. The
+guard it names lives in `pkg/passage/pid_test.go:685`, **not** in
+`decoupling_test.go`; that file then held **seven** test functions, of which
+only **two** were paired mutations — G-DECOUPLE-3 (the AST check) and
+G-DECOUPLE-4 (the schema read-back) shipped none, so "four" overstated the
+suite by two. The two missing mutations were written rather than the claim
+walked back, which is why the corrected figure is four and not two. Re-derive
+instead of trusting this note:
+
+```bash
+grep -c '^func Test'              pkg/passage/decoupling_test.go   # 9
+grep -c '^func TestPairedMutation' pkg/passage/decoupling_test.go  # 4
+grep -rn '^func TestNoConsumerShapedDependencies' pkg/            # pid_test.go
+```
 
 ### Migration — every removed name and what replaces it
 

@@ -98,6 +98,22 @@ AST check that no `Kind` constant is declared; and a behavioural check that
 reads the built database back. Each ships with a paired mutation that has been
 observed to fail.
 
+That last sentence became true on 2026-09-06 and was an overstatement until
+then: the AST check and the schema read-back shipped **no** mutation, so two of
+the four "instruments that hold the line" had never been seen to report
+anything. Both now have one, each driving the same function the gate calls with
+the violation supplied as data — a seeded `Kind` constant parsed out of a temp
+directory, and one of this module's own retired v0.1.x columns added back to a
+real built database by `ALTER TABLE`, which is precisely the migration case the
+schema gate's own comment claims to cover.
+
+The retired column is named in the mutation's source, not here, and that is not
+squeamishness: this file **is** part of the dictionary scan's corpus, so writing
+the word into this sentence fails the gate. It was written here first, by
+accident, while drafting this very paragraph — and
+`TestNoConsumerShapedVocabularyInSource` reported `README.md:106` on the next
+run. The instrument is load-bearing enough to catch the person documenting it.
+
 All test fixtures are synthetic.
 
 ## Install

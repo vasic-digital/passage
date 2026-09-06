@@ -400,43 +400,7 @@ func TestSchemaCarriesNoConsumerShapedColumnOrIndex(t *testing.T) {
 	// Every object name and every column name the file actually holds, read
 	// back from the database. A grep over schemaSQL would miss a column added
 	// by a migration; this does not.
-	var names []string
-	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var objects []struct{ kind, name string }
-	for rows.Next() {
-		var kind, name string
-		if err := rows.Scan(&kind, &name); err != nil {
-			rows.Close()
-			t.Fatal(err)
-		}
-		objects = append(objects, struct{ kind, name string }{kind, name})
-		names = append(names, kind+" "+name)
-	}
-	rows.Close()
-	if len(objects) == 0 {
-		t.Fatal("the database holds no objects — the check would pass by looking at nothing")
-	}
-	for _, o := range objects {
-		if o.kind != "table" {
-			continue
-		}
-		cols, err := db.Query(`SELECT name FROM pragma_table_info(?)`, o.name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for cols.Next() {
-			var c string
-			if err := cols.Scan(&c); err != nil {
-				cols.Close()
-				t.Fatal(err)
-			}
-			names = append(names, "column "+o.name+"."+c)
-		}
-		cols.Close()
-	}
+	names := schemaObjectAndColumnNames(t, db)
 	for _, n := range names {
 		for _, h := range scanConsumerVocabulary("schema", []byte(n)) {
 			t.Errorf("the derived database carries a consumer-shaped name (%q): %s",
@@ -518,6 +482,171 @@ func TestBuildDBRefusesAForeignSchemaVersionInsteadOfDestroyingIt(t *testing.T) 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+// schemaObjectAndColumnNames reads back every object name and every column
+// name the database actually holds. It is the single implementation behind
+// G-DECOUPLE-4 and its paired mutation, so the mutation drives the code the
+// real gate runs rather than a copy that could agree while the original rots.
+//
+// It fails rather than returning an empty slice when the file holds nothing:
+// a scan over no names reports no hits and is indistinguishable from clean.
+func schemaObjectAndColumnNames(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	var names []string
+	rows, err := db.Query(`SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objects []struct{ kind, name string }
+	for rows.Next() {
+		var kind, name string
+		if err := rows.Scan(&kind, &name); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		objects = append(objects, struct{ kind, name string }{kind, name})
+		names = append(names, kind+" "+name)
+	}
+	rows.Close()
+	if len(objects) == 0 {
+		t.Fatal("the database holds no objects — the check would pass by looking at nothing")
+	}
+	for _, o := range objects {
+		if o.kind != "table" {
+			continue
+		}
+		cols, err := db.Query(`SELECT name FROM pragma_table_info(?)`, o.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for cols.Next() {
+			var c string
+			if err := cols.Scan(&c); err != nil {
+				cols.Close()
+				t.Fatal(err)
+			}
+			names = append(names, "column "+o.name+"."+c)
+		}
+		cols.Close()
+	}
+	return names
+}
+
+// TestPairedMutation_TheKindConstantScannerCatchesASeededMember is the §1.1
+// proof G-DECOUPLE-3 shipped without.
+//
+// The gate asserts an ABSENCE — that this package declares no `Kind` constant
+// — over a subject set it derives by parsing a directory. An absence assertion
+// with no positive control passes trivially the day the parse returns nothing,
+// and until this test existed nothing had ever seen `declaredKindConstants`
+// report a single name. The mutation is DATA: a seeded source file in a temp
+// directory, parsed by the same function the gate calls.
+func TestPairedMutation_TheKindConstantScannerCatchesASeededMember(t *testing.T) {
+	// CONTROL: a package declaring no Kind constant produces no names, so a
+	// name below means the seeded declaration and not a scanner that fires on
+	// anything. Constants of OTHER types must not be reported either.
+	clean := t.TempDir()
+	if err := os.WriteFile(filepath.Join(clean, "clean.go"), []byte(
+		"package passage\n\ntype Kind string\n\nconst unrelated int = 3\n"+
+			"const alsoUnrelated Syntax = \"html\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := declaredKindConstants(t, clean); len(got) != 0 {
+		t.Fatalf("CONTROL FAILED: the scanner reported %v on a package declaring no Kind "+
+			"constant", got)
+	}
+
+	// The mutation: exactly the shape this module shipped for two releases —
+	// a closed enum of one consumer's content types, re-added.
+	seeded := t.TempDir()
+	if err := os.WriteFile(filepath.Join(seeded, "seeded.go"), []byte(
+		"package passage\n\ntype Kind string\n\nconst (\n"+
+			"\tKindSeededAlpha Kind = \"seeded_alpha\"\n"+
+			"\tKindSeededBeta  Kind = \"seeded_beta\"\n)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := declaredKindConstants(t, seeded)
+	if len(got) == 0 {
+		t.Fatal("MUTATION SURVIVED: the scanner did not report a re-added Kind constant. " +
+			"The gate is inoperative — Kind could be re-closed around one consumer's " +
+			"vocabulary and this would stay green.")
+	}
+	t.Logf("mutation caught: %d Kind constant(s) reported — %v", len(got), got)
+}
+
+// TestPairedMutation_TheSchemaScannerCatchesASeededColumn is the §1.1 proof
+// G-DECOUPLE-4 shipped without.
+//
+// It adds a consumer-shaped column to a REAL built database and requires the
+// same read-back the gate uses to surface it. That is the case the gate's own
+// comment claims to cover — "a grep over schemaSQL would miss a column added
+// by a migration; this does not" — and it had never been demonstrated.
+func TestPairedMutation_TheSchemaScannerCatchesASeededColumn(t *testing.T) {
+	dir := t.TempDir()
+	reg := NewRegistry()
+	if err := reg.Put(minimalRecord("01JBX7QK3M8V2ZC4YT5N6RWDPA", "x")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "p.db")
+	if err := reg.BuildDB(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// CONTROL: as built, the schema carries nothing consumer-shaped. This is
+	// the same assertion the gate makes, restated here so a hit after the
+	// ALTER is attributable to the ALTER.
+	before := schemaObjectAndColumnNames(t, db)
+	for _, n := range before {
+		if hits := scanConsumerVocabulary("schema", []byte(n)); len(hits) != 0 {
+			t.Fatalf("CONTROL FAILED: the as-built schema already carries %q", n)
+		}
+	}
+
+	// The mutation, applied to the database rather than to the gate: exactly
+	// the column this module shipped in schema v1, re-added the way a careless
+	// migration would add it.
+	if _, err := db.Exec(`ALTER TABLE passages ADD COLUMN chapter_slug TEXT`); err != nil {
+		t.Fatalf("seeding the column: %v", err)
+	}
+	after := schemaObjectAndColumnNames(t, db)
+	if len(after) <= len(before) {
+		t.Fatalf("the seeded column did not reach the file: %d names before, %d after",
+			len(before), len(after))
+	}
+	var caught []string
+	for _, n := range after {
+		for _, h := range scanConsumerVocabulary("schema", []byte(n)) {
+			caught = append(caught, n+" ("+h.Token+")")
+		}
+	}
+	if len(caught) == 0 {
+		t.Fatal("MUTATION SURVIVED: a consumer-shaped column added by a migration was not " +
+			"reported. The gate is inoperative — it would not catch the exact defect its " +
+			"own comment says it exists for.")
+	}
+	t.Logf("mutation caught: %v", caught)
+
+	// And an index, which is the other half of the gate's subject set and is
+	// read back through sqlite_master rather than through pragma_table_info.
+	if _, err := db.Exec(`CREATE INDEX passages_by_chapter ON passages(chapter_slug)`); err != nil {
+		t.Fatalf("seeding the index: %v", err)
+	}
+	var idxCaught bool
+	for _, n := range schemaObjectAndColumnNames(t, db) {
+		if len(scanConsumerVocabulary("schema", []byte(n))) != 0 && strings.Contains(n, "index") {
+			idxCaught = true
+		}
+	}
+	if !idxCaught {
+		t.Error("MUTATION SURVIVED: a consumer-shaped INDEX name went unreported, so only " +
+			"the column half of this gate is proven")
+	}
+}
 
 // thisPackageDir returns the directory holding this package's sources, derived
 // from the working directory rather than written down.
