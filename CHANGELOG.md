@@ -5,6 +5,19 @@ repository; a published tag is never moved (§11.4.113).
 
 ---
 
+## Unreleased (proposed v0.3.0, additive)
+
+- `SyntaxForPath` now recognises `.xhtml` (case-insensitive) and returns
+  `SyntaxHTML`, so `Registry.SyncFile` writes the same `<!-- pid: ... -->`
+  anchors into XHTML sources (for example EPUB spine documents). Additive:
+  every previously accepted extension behaves identically, and `.xhtml`
+  previously returned "no inline syntax" (sidecar/registry-only). No other
+  API, schema or wire format changed. Tests: `TestPerFormatAnchorSyntax`
+  (extended) and `TestSyncFileXHTMLInlineAnchors` (new, synthetic fixture,
+  idempotent re-sync).
+
+---
+
 ## v0.2.0 — 2026-09-01
 
 ### BREAKING. Read the migration table before upgrading.

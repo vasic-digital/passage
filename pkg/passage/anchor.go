@@ -61,7 +61,7 @@ var (
 // which is most of them.
 func SyntaxForPath(path string) (Syntax, bool) {
 	switch strings.ToLower(filepath.Ext(path)) {
-	case ".md", ".markdown", ".html", ".htm", ".svg":
+	case ".md", ".markdown", ".html", ".htm", ".xhtml", ".svg":
 		return SyntaxHTML, true
 	case ".mmd", ".mermaid":
 		return SyntaxMermaid, true

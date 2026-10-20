@@ -1,0 +1,1 @@
+{"check":"xhtml inline anchors via SyncFile","expected":"ok, RED observed before fix","observed":"ok  	github.com/vasic-digital/passage/pkg/passage	0.827s	coverage: 82.8% of statements","rc":0}

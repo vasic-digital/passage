@@ -55,6 +55,8 @@ func TestPerFormatAnchorSyntax(t *testing.T) {
 	}{
 		{"a/b/doc.md", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
 		{"a/b/page.html", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
+		{"a/b/doc.xhtml", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
+		{"a/b/DOC.XHTML", "<!-- pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA -->"},
 		{"a/b/flow.mmd", "%% pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA"},
 		{"a/b/seq.puml", "' pid: 01JBX7QK3M8V2ZC4YT5N6RWDPA"},
 	}

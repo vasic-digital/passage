@@ -1,0 +1,1 @@
+ok  	github.com/vasic-digital/passage/pkg/passage	0.827s	coverage: 82.8% of statements
