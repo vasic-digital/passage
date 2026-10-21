@@ -53,3 +53,40 @@ func TestSyncFileXHTMLInlineAnchors(t *testing.T) {
 		t.Fatalf("re-sync changed the file; want byte-identical")
 	}
 }
+
+// Oracle (XHTML-2): an XML declaration must be the very first bytes of an XML
+// document. SyncFile on an .xhtml that starts with `<?xml ...?>` must therefore
+// never put an anchor comment before it; the anchor goes after the declaration,
+// the declaration line is never part of a passage's text, and a re-sync is
+// byte-identical.
+func TestSyncFileXHTMLKeepsXMLDeclarationFirst(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "spine02.xhtml")
+	doc := "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+		"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n" +
+		"<p>synthetic one</p>\n\n<p>synthetic two</p>\n</body></html>\n"
+	if err := os.WriteFile(path, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry()
+	m := newTestMinter()
+	const kind Kind = "textbook_section"
+	if _, err := reg.SyncFile(path, kind, m); err != nil {
+		t.Fatalf("SyncFile: %v", err)
+	}
+	first, _ := os.ReadFile(path)
+	if !strings.HasPrefix(string(first), "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n") {
+		t.Fatalf("XML declaration is not the first line:\n%s", first)
+	}
+	if n := strings.Count(string(first), "<!-- pid: "); n != 2 {
+		t.Fatalf("anchors = %d, want 2:\n%s", n, first)
+	}
+	second, err := reg.SyncFile(path, kind, m)
+	if err != nil || len(second.Minted) != 0 {
+		t.Fatalf("re-sync err=%v minted=%d, want 0", err, len(second.Minted))
+	}
+	again, _ := os.ReadFile(path)
+	if string(first) != string(again) {
+		t.Fatalf("re-sync changed the file:\n%s\n---\n%s", first, again)
+	}
+}

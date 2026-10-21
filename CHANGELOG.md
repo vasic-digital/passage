@@ -14,7 +14,10 @@ repository; a published tag is never moved (§11.4.113).
   previously returned "no inline syntax" (sidecar/registry-only). No other
   API, schema or wire format changed. Tests: `TestPerFormatAnchorSyntax`
   (extended) and `TestSyncFileXHTMLInlineAnchors` (new, synthetic fixture,
-  idempotent re-sync).
+  idempotent re-sync). For `.xhtml` only, `Blocks` skips a leading single-line
+  `<?xml ...?>` declaration so no anchor is ever written before it (an XML
+  declaration must be the first bytes of the document); test
+  `TestSyncFileXHTMLKeepsXMLDeclarationFirst`.
 
 ---
 

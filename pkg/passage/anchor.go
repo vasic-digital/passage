@@ -158,6 +158,14 @@ func Blocks(src []byte, s Syntax, path string, kind Kind) ([]Observation, error)
 	lines := splitLines(src)
 	var out []Observation
 	i := 0
+	// An XML declaration must be the first bytes of an XML document, so an
+	// .xhtml source's single-line `<?xml ...?>` is never part of a passage and
+	// never has an anchor written before it.
+	if strings.EqualFold(filepath.Ext(path), ".xhtml") && len(lines) > 0 {
+		if t := strings.TrimSpace(lines[0]); strings.HasPrefix(t, "<?xml") && strings.HasSuffix(t, "?>") {
+			i = 1
+		}
+	}
 	for i < len(lines) {
 		if strings.TrimSpace(lines[i]) == "" {
 			i++
